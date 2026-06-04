@@ -1,23 +1,20 @@
 // Sample data so visitors without a resume/JD handy can try the tool instantly.
 
-export const SAMPLE_RESUME = `Sanu Jaiswal
+export const SAMPLE_RESUME = `ABC DEF
 Software Engineer | Bengaluru, India
-sjlskdevi49@gmail.com | github.com/SanuJaiswal | linkedin.com/in/sanujaiswal
+abc@gmail.com | github.com/abc | linkedin.com/in/abc
 
 PROFESSIONAL SUMMARY
 Full-stack Software Engineer with 2+ years of experience building production-grade React and Node.js applications for global enterprises. Skilled in React, TypeScript, AWS, and Python automation. Passionate about clean code, performance, and shipping reliable software.
 
 EXPERIENCE
 
-Full Stack Engineer | Kenvue | Sep 2025 - Present
-- Built guided provisioning automation with prerequisite gating, reducing invalid executions by 40%.
-- Implemented GitHub App authentication using JWT and installation tokens with caching.
+Full Stack Engineer | XYZ | Jan 2025 - Present
 - Led Content Search integration with loading, empty, and error states across 3 product surfaces.
 - Supported backend automation using AWS Lambda, CloudWatch Logs, and DynamoDB metadata queries.
 
-Associate | Deloitte USI | Jul 2023 - Aug 2025
+Associate | RST | Jul 2023 - Dec 2024
 - Developed responsive React dashboards using Shadcn UI and Tailwind CSS for 4 enterprise clients.
-- Architected RESTful APIs with Node.js and Express, integrated with AWS Lambda and S3.
 - Built a Python tool using FAISS and OpenAI to compare Excel datasets and extract metadata.
 - Automated regression suites with Java, Selenium WebDriver, and TestNG, cutting manual QA effort by 25%.
 
