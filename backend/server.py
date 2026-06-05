@@ -7,20 +7,29 @@ import re
 import json
 import asyncio
 import logging
-import uuid
 import httpx
 from bs4 import BeautifulSoup
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field, ValidationError, conint
 from pypdf import PdfReader
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from openai import AsyncOpenAI
 
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+# Official OpenAI SDK. Set OPENAI_API_KEY in backend/.env.
+# Optional: OPENAI_BASE_URL to route through an OpenAI-compatible gateway.
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+OPENAI_BASE_URL = os.environ.get('OPENAI_BASE_URL') or None
+OPENAI_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-4o')
+
+_openai_client: Optional[AsyncOpenAI] = (
+    AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+    if OPENAI_API_KEY
+    else None
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -261,8 +270,8 @@ async def analyze_resume(
     resume_text: str = Form(default=""),
     resume_file: UploadFile = File(default=None),
 ):
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(status_code=500, detail="LLM key not configured")
+    if _openai_client is None:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured")
 
     resume_content = resume_text.strip()
     if resume_file is not None:
@@ -286,12 +295,6 @@ async def analyze_resume(
 
     response = ""
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"resume-{uuid.uuid4()}",
-            system_message=RESUME_ANALYZER_SYSTEM_PROMPT,
-        ).with_model("openai", "gpt-4o")
-
         user_text = (
             f"=== JOB DESCRIPTION ===\n{job_description}\n\n"
             f"=== RESUME ===\n{resume_content}\n\n"
@@ -300,7 +303,16 @@ async def analyze_resume(
             f"Respond with the required JSON only."
         )
 
-        response = await chat.send_message(UserMessage(text=user_text))
+        completion = await _openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": RESUME_ANALYZER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+        )
+        response = completion.choices[0].message.content or ""
         text = _strip_code_fence(response)
         raw = json.loads(text)
         raw = _normalize_category_scores(raw)
