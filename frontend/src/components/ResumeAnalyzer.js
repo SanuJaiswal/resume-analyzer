@@ -31,6 +31,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../hooks/use-toast';
 import { useAnalysisHistory } from '../hooks/useAnalysisHistory';
 import { ScoreRing, CategoryRadarChart, SkillsBarChart } from './analyzer/AnalyzerCharts';
+import WhyThisScore from './analyzer/WhyThisScore';
 import { validateUrl, validateAnalysisInput, validatePdfFile } from './analyzer/validators';
 import { SAMPLE_RESUME, SAMPLE_JD } from '../data/sampleAnalyzerData';
 
@@ -476,6 +477,11 @@ const ResumeAnalyzer = () => {
                   <CategoryRadarChart categoryScores={result.category_scores} />
                   <SkillsBarChart matched={result.matched_skills} missing={result.missing_skills} />
                 </div>
+              )}
+
+              {/* Why This Score? — Explainable AI */}
+              {result.category_scores && (
+                <WhyThisScore categoryScores={result.category_scores} />
               )}
 
               {/* Skills Grid */}

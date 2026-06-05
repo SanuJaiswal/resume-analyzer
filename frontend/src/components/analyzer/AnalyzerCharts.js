@@ -58,7 +58,8 @@ export const ScoreRing = ({ score }) => {
 const CATEGORY_LABELS = {
   technical_skills: 'Technical Skills',
   experience: 'Experience',
-  domain_knowledge: 'Domain Fit',
+  domain_fit: 'Domain Fit',
+  domain_knowledge: 'Domain Fit', // legacy key
   soft_skills: 'Soft Skills',
   education: 'Education',
 };
@@ -67,7 +68,8 @@ export const CategoryRadarChart = ({ categoryScores }) => {
   if (!categoryScores) return null;
   const data = Object.entries(categoryScores).map(([key, value]) => ({
     category: CATEGORY_LABELS[key] || key,
-    score: value,
+    // Support both new (object with .score) and legacy (number) shapes
+    score: typeof value === 'object' && value !== null ? (value.score ?? 0) : Number(value) || 0,
   }));
 
   return (

@@ -11,7 +11,8 @@ import uuid
 import httpx
 from bs4 import BeautifulSoup
 from pathlib import Path
-from pydantic import BaseModel
+from typing import List, Optional
+from pydantic import BaseModel, Field, ValidationError, conint
 from pypdf import PdfReader
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
@@ -31,20 +32,36 @@ app = FastAPI(title="Resume Analyzer API")
 api_router = APIRouter(prefix="/api")
 
 
-RESUME_ANALYZER_SYSTEM_PROMPT = """You are a senior tech recruiter and resume coach. You analyze how well a resume matches a job description.
+RESUME_ANALYZER_SYSTEM_PROMPT = """You are a senior tech recruiter and resume coach. You analyze how well a resume matches a job description with deep, explainable reasoning.
 
-You ALWAYS respond with ONLY valid JSON in this exact structure (no markdown, no code fences):
+You ALWAYS respond with ONLY valid JSON in this EXACT structure (no markdown, no code fences, no commentary):
 {
   "match_score": <int 0-100>,
   "verdict": "<one-line summary>",
   "matched_skills": ["skill1", ...],
   "missing_skills": ["skill1", ...],
   "category_scores": {
-    "technical_skills": <int 0-100>,
-    "experience": <int 0-100>,
-    "domain_knowledge": <int 0-100>,
-    "soft_skills": <int 0-100>,
-    "education": <int 0-100>
+    "technical_skills": {
+      "score": <int 0-100>,
+      "explanation": "<2-3 sentence reasoning for THIS score, citing specifics from BOTH the resume and the JD>",
+      "matched_evidence": [
+        {
+          "resume_text": "<short verbatim or near-verbatim phrase from the resume>",
+          "jd_requirement": "<the specific JD requirement this satisfies>",
+          "reason": "<why this resume phrase satisfies the JD requirement>"
+        }
+      ],
+      "missing_evidence": [
+        {
+          "jd_requirement": "<a specific JD requirement NOT met by the resume>",
+          "reason": "<why this is missing or weak in the resume>"
+        }
+      ]
+    },
+    "experience": { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] },
+    "domain_fit":  { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] },
+    "education":   { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] },
+    "soft_skills": { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] }
   },
   "strengths": ["bullet1", "bullet2", "bullet3"],
   "gaps": ["bullet1", "bullet2", "bullet3"],
@@ -55,13 +72,65 @@ You ALWAYS respond with ONLY valid JSON in this exact structure (no markdown, no
   ]
 }
 
-Rules:
+Strict rules:
+- ALL FIVE category keys must be present: technical_skills, experience, domain_fit, education, soft_skills. Never omit any.
+- Each category MUST contain: score, explanation, matched_evidence (array), missing_evidence (array). Arrays may be empty but the keys must exist.
+- matched_evidence: 1-4 items per category when possible. resume_text must be a short, recognizable phrase actually present (or paraphrased) in the resume.
+- missing_evidence: 1-4 items per category when applicable. Empty array only if there are no meaningful gaps.
+- explanation must be specific (not generic) - reference real items from the resume/JD.
 - match_score: be realistic, not generous. 90+ only if truly exceptional match.
-- category_scores: rate each independently 0-100 based on JD requirements vs resume evidence.
-- Keep arrays concise (3-6 items each).
-- improved_bullets: pick 2-3 actual bullets from resume and rewrite stronger.
-- Plain ASCII, no emojis."""
+- category score must be internally consistent with its evidence (lots of missing_evidence => lower score).
+- Keep matched_skills and missing_skills concise (3-12 items each).
+- improved_bullets: pick 2-3 actual bullets from resume and rewrite stronger with metrics and JD keywords.
+- Plain ASCII, no emojis, no markdown."""
 
+
+# ---------- Pydantic schema ----------
+
+class MatchedEvidence(BaseModel):
+    resume_text: str = ""
+    jd_requirement: str = ""
+    reason: str = ""
+
+
+class MissingEvidence(BaseModel):
+    jd_requirement: str = ""
+    reason: str = ""
+
+
+class CategoryScore(BaseModel):
+    score: conint(ge=0, le=100) = 0
+    explanation: str = ""
+    matched_evidence: List[MatchedEvidence] = Field(default_factory=list)
+    missing_evidence: List[MissingEvidence] = Field(default_factory=list)
+
+
+class CategoryScores(BaseModel):
+    technical_skills: CategoryScore
+    experience: CategoryScore
+    domain_fit: CategoryScore
+    education: CategoryScore
+    soft_skills: CategoryScore
+
+
+class ImprovedBullet(BaseModel):
+    original: str = ""
+    improved: str = ""
+
+
+class AnalysisResult(BaseModel):
+    match_score: conint(ge=0, le=100)
+    verdict: str
+    matched_skills: List[str] = Field(default_factory=list)
+    missing_skills: List[str] = Field(default_factory=list)
+    category_scores: CategoryScores
+    strengths: List[str] = Field(default_factory=list)
+    gaps: List[str] = Field(default_factory=list)
+    suggestions: List[str] = Field(default_factory=list)
+    improved_bullets: List[ImprovedBullet] = Field(default_factory=list)
+
+
+# ---------- helpers ----------
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -90,6 +159,61 @@ def extract_jd_from_html(html: str) -> str:
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text
 
+
+def _strip_code_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip().rstrip("`").strip()
+    return text
+
+
+def _normalize_category_scores(raw: dict) -> dict:
+    """Backward-compat: accept either old (int) or new (object) shape per category.
+    Also accepts legacy key 'domain_knowledge' and maps it to 'domain_fit'.
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    cs = raw.get("category_scores")
+    if not isinstance(cs, dict):
+        return raw
+
+    # legacy key rename
+    if "domain_knowledge" in cs and "domain_fit" not in cs:
+        cs["domain_fit"] = cs.pop("domain_knowledge")
+
+    required = ["technical_skills", "experience", "domain_fit", "education", "soft_skills"]
+    for key in required:
+        val = cs.get(key)
+        if isinstance(val, (int, float)):
+            # upgrade old shape
+            cs[key] = {
+                "score": int(val),
+                "explanation": "",
+                "matched_evidence": [],
+                "missing_evidence": [],
+            }
+        elif isinstance(val, dict):
+            val.setdefault("score", 0)
+            val.setdefault("explanation", "")
+            val.setdefault("matched_evidence", [])
+            val.setdefault("missing_evidence", [])
+        else:
+            cs[key] = {
+                "score": 0,
+                "explanation": "",
+                "matched_evidence": [],
+                "missing_evidence": [],
+            }
+
+    raw["category_scores"] = cs
+    return raw
+
+
+# ---------- routes ----------
 
 class JobUrlRequest(BaseModel):
     url: str
@@ -171,22 +295,27 @@ async def analyze_resume(
         user_text = (
             f"=== JOB DESCRIPTION ===\n{job_description}\n\n"
             f"=== RESUME ===\n{resume_content}\n\n"
-            f"Analyze the match and respond with the required JSON only."
+            f"Analyze the match. For EACH category, give a numeric score, a specific explanation, "
+            f"and concrete matched_evidence + missing_evidence drawn from the actual resume and JD text above. "
+            f"Respond with the required JSON only."
         )
 
         response = await chat.send_message(UserMessage(text=user_text))
+        text = _strip_code_fence(response)
+        raw = json.loads(text)
+        raw = _normalize_category_scores(raw)
 
-        text = response.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip().rstrip("`").strip()
+        validated = AnalysisResult.model_validate(raw)
+        return validated.model_dump()
 
-        return json.loads(text)
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parse failed: {str(e)} | raw: {response[:300]}")
-        raise HTTPException(status_code=500, detail="AI returned an unexpected format. Please try again.")
+        logger.error(f"JSON parse failed: {str(e)} | raw: {response[:400]}")
+        raise HTTPException(status_code=502, detail="AI returned an unexpected format. Please try again.")
+    except ValidationError as e:
+        logger.error(f"Schema validation failed: {e.errors()} | raw: {response[:400]}")
+        raise HTTPException(status_code=502, detail="AI response failed schema validation. Please try again.")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Resume analysis failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to analyze. Please try again.")
