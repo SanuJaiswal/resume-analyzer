@@ -133,7 +133,14 @@ export const SkillsBarChart = ({ matched = [], missing = [] }) => {
               backgroundColor: 'rgba(15, 23, 42, 0.95)',
               border: '1px solid #06b6d4',
               borderRadius: '8px',
-              color: '#fff',
+              color: '#ffffff',
+            }}
+            itemStyle={{
+              color: "#ffffff",
+            }}
+            labelStyle={{
+              color: "#ffffff",
+              fontWeight: 600,
             }}
             formatter={(v) => [`${v} skills`, '']}
             cursor={{ fill: 'rgba(6, 182, 212, 0.1)' }}
