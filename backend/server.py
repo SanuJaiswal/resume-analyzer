@@ -13,85 +13,21 @@ from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field, ValidationError, conint
 from pypdf import PdfReader
-from openai import AsyncOpenAI
-
-
+from llm.llm_factory import get_llm
+from prompts.resume_analyzer import (
+    RESUME_ANALYZER_SYSTEM_PROMPT
+)
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
-
-# Official OpenAI SDK. Set OPENAI_API_KEY in backend/.env.
-# Optional: OPENAI_BASE_URL to route through an OpenAI-compatible gateway.
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-OPENAI_BASE_URL = os.environ.get('OPENAI_BASE_URL') or None
-OPENAI_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-4o')
-
-_openai_client: Optional[AsyncOpenAI] = (
-    AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
-    if OPENAI_API_KEY
-    else None
-)
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
+llm = get_llm()
 app = FastAPI(title="Resume Analyzer API")
 api_router = APIRouter(prefix="/api")
-
-
-RESUME_ANALYZER_SYSTEM_PROMPT = """You are a senior tech recruiter and resume coach. You analyze how well a resume matches a job description with deep, explainable reasoning.
-
-You ALWAYS respond with ONLY valid JSON in this EXACT structure (no markdown, no code fences, no commentary):
-{
-  "match_score": <int 0-100>,
-  "verdict": "<one-line summary>",
-  "matched_skills": ["skill1", ...],
-  "missing_skills": ["skill1", ...],
-  "category_scores": {
-    "technical_skills": {
-      "score": <int 0-100>,
-      "explanation": "<2-3 sentence reasoning for THIS score, citing specifics from BOTH the resume and the JD>",
-      "matched_evidence": [
-        {
-          "resume_text": "<short verbatim or near-verbatim phrase from the resume>",
-          "jd_requirement": "<the specific JD requirement this satisfies>",
-          "reason": "<why this resume phrase satisfies the JD requirement>"
-        }
-      ],
-      "missing_evidence": [
-        {
-          "jd_requirement": "<a specific JD requirement NOT met by the resume>",
-          "reason": "<why this is missing or weak in the resume>"
-        }
-      ]
-    },
-    "experience": { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] },
-    "domain_fit":  { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] },
-    "education":   { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] },
-    "soft_skills": { "score": <int>, "explanation": "...", "matched_evidence": [...], "missing_evidence": [...] }
-  },
-  "strengths": ["bullet1", "bullet2", "bullet3"],
-  "gaps": ["bullet1", "bullet2", "bullet3"],
-  "suggestions": ["actionable1", "actionable2", "actionable3", "actionable4"],
-  "improved_bullets": [
-    {"original": "<weak bullet from resume>", "improved": "<rewritten with metrics and JD keywords>"},
-    {"original": "<weak bullet from resume>", "improved": "<rewritten with metrics and JD keywords>"}
-  ]
-}
-
-Strict rules:
-- ALL FIVE category keys must be present: technical_skills, experience, domain_fit, education, soft_skills. Never omit any.
-- Each category MUST contain: score, explanation, matched_evidence (array), missing_evidence (array). Arrays may be empty but the keys must exist.
-- matched_evidence: 1-4 items per category when possible. resume_text must be a short, recognizable phrase actually present (or paraphrased) in the resume.
-- missing_evidence: 1-4 items per category when applicable. Empty array only if there are no meaningful gaps.
-- explanation must be specific (not generic) - reference real items from the resume/JD.
-- match_score: be realistic, not generous. 90+ only if truly exceptional match.
-- category score must be internally consistent with its evidence (lots of missing_evidence => lower score).
-- Keep matched_skills and missing_skills concise (3-12 items each).
-- improved_bullets: pick 2-3 actual bullets from resume and rewrite stronger with metrics and JD keywords.
-- Plain ASCII, no emojis, no markdown."""
 
 
 # ---------- Pydantic schema ----------
@@ -270,8 +206,6 @@ async def analyze_resume(
     resume_text: str = Form(default=""),
     resume_file: UploadFile = File(default=None),
 ):
-    if _openai_client is None:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured")
 
     resume_content = resume_text.strip()
     if resume_file is not None:
@@ -303,16 +237,10 @@ async def analyze_resume(
             f"Respond with the required JSON only."
         )
 
-        completion = await _openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": RESUME_ANALYZER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_text},
-            ],
+        response = await llm.generate(
+            system_prompt=RESUME_ANALYZER_SYSTEM_PROMPT,
+            user_prompt=user_text
         )
-        response = completion.choices[0].message.content or ""
         text = _strip_code_fence(response)
         raw = json.loads(text)
         raw = _normalize_category_scores(raw)
