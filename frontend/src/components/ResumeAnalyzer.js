@@ -216,7 +216,7 @@ const ResumeAnalyzer = () => {
         >
           <Badge variant="secondary" className="mb-4">
             <Sparkles className="h-3 w-3 mr-1 inline" />
-            AI-Powered · GPT-4o
+            AI-Powered
           </Badge>
           <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight text-slate-900 dark:text-white mb-4">
             Resume Analyzer
