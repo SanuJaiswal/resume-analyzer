@@ -7,61 +7,75 @@ import re
 import json
 import asyncio
 import logging
-import uuid
 import httpx
 from bs4 import BeautifulSoup
 from pathlib import Path
-from pydantic import BaseModel
+from typing import List, Optional
+from pydantic import BaseModel, Field, ValidationError, conint
 from pypdf import PdfReader
-from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-
+from llm.llm_factory import get_llm
+from prompts.resume_analyzer import (
+    RESUME_ANALYZER_SYSTEM_PROMPT
+)
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
-
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
+llm = get_llm()
 app = FastAPI(title="Resume Analyzer API")
 api_router = APIRouter(prefix="/api")
 
 
-RESUME_ANALYZER_SYSTEM_PROMPT = """You are a senior tech recruiter and resume coach. You analyze how well a resume matches a job description.
+# ---------- Pydantic schema ----------
 
-You ALWAYS respond with ONLY valid JSON in this exact structure (no markdown, no code fences):
-{
-  "match_score": <int 0-100>,
-  "verdict": "<one-line summary>",
-  "matched_skills": ["skill1", ...],
-  "missing_skills": ["skill1", ...],
-  "category_scores": {
-    "technical_skills": <int 0-100>,
-    "experience": <int 0-100>,
-    "domain_knowledge": <int 0-100>,
-    "soft_skills": <int 0-100>,
-    "education": <int 0-100>
-  },
-  "strengths": ["bullet1", "bullet2", "bullet3"],
-  "gaps": ["bullet1", "bullet2", "bullet3"],
-  "suggestions": ["actionable1", "actionable2", "actionable3", "actionable4"],
-  "improved_bullets": [
-    {"original": "<weak bullet from resume>", "improved": "<rewritten with metrics and JD keywords>"},
-    {"original": "<weak bullet from resume>", "improved": "<rewritten with metrics and JD keywords>"}
-  ]
-}
+class MatchedEvidence(BaseModel):
+    resume_text: str = ""
+    jd_requirement: str = ""
+    reason: str = ""
 
-Rules:
-- match_score: be realistic, not generous. 90+ only if truly exceptional match.
-- category_scores: rate each independently 0-100 based on JD requirements vs resume evidence.
-- Keep arrays concise (3-6 items each).
-- improved_bullets: pick 2-3 actual bullets from resume and rewrite stronger.
-- Plain ASCII, no emojis."""
 
+class MissingEvidence(BaseModel):
+    jd_requirement: str = ""
+    reason: str = ""
+
+
+class CategoryScore(BaseModel):
+    score: conint(ge=0, le=100) = 0
+    explanation: str = ""
+    matched_evidence: List[MatchedEvidence] = Field(default_factory=list)
+    missing_evidence: List[MissingEvidence] = Field(default_factory=list)
+
+
+class CategoryScores(BaseModel):
+    technical_skills: CategoryScore
+    experience: CategoryScore
+    domain_fit: CategoryScore
+    education: CategoryScore
+    soft_skills: CategoryScore
+
+
+class ImprovedBullet(BaseModel):
+    original: str = ""
+    improved: str = ""
+
+
+class AnalysisResult(BaseModel):
+    match_score: conint(ge=0, le=100)
+    verdict: str
+    matched_skills: List[str] = Field(default_factory=list)
+    missing_skills: List[str] = Field(default_factory=list)
+    category_scores: CategoryScores
+    strengths: List[str] = Field(default_factory=list)
+    gaps: List[str] = Field(default_factory=list)
+    suggestions: List[str] = Field(default_factory=list)
+    improved_bullets: List[ImprovedBullet] = Field(default_factory=list)
+
+
+# ---------- helpers ----------
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -90,6 +104,61 @@ def extract_jd_from_html(html: str) -> str:
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text
 
+
+def _strip_code_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip().rstrip("`").strip()
+    return text
+
+
+def _normalize_category_scores(raw: dict) -> dict:
+    """Backward-compat: accept either old (int) or new (object) shape per category.
+    Also accepts legacy key 'domain_knowledge' and maps it to 'domain_fit'.
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    cs = raw.get("category_scores")
+    if not isinstance(cs, dict):
+        return raw
+
+    # legacy key rename
+    if "domain_knowledge" in cs and "domain_fit" not in cs:
+        cs["domain_fit"] = cs.pop("domain_knowledge")
+
+    required = ["technical_skills", "experience", "domain_fit", "education", "soft_skills"]
+    for key in required:
+        val = cs.get(key)
+        if isinstance(val, (int, float)):
+            # upgrade old shape
+            cs[key] = {
+                "score": int(val),
+                "explanation": "",
+                "matched_evidence": [],
+                "missing_evidence": [],
+            }
+        elif isinstance(val, dict):
+            val.setdefault("score", 0)
+            val.setdefault("explanation", "")
+            val.setdefault("matched_evidence", [])
+            val.setdefault("missing_evidence", [])
+        else:
+            cs[key] = {
+                "score": 0,
+                "explanation": "",
+                "matched_evidence": [],
+                "missing_evidence": [],
+            }
+
+    raw["category_scores"] = cs
+    return raw
+
+
+# ---------- routes ----------
 
 class JobUrlRequest(BaseModel):
     url: str
@@ -137,8 +206,6 @@ async def analyze_resume(
     resume_text: str = Form(default=""),
     resume_file: UploadFile = File(default=None),
 ):
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(status_code=500, detail="LLM key not configured")
 
     resume_content = resume_text.strip()
     if resume_file is not None:
@@ -162,31 +229,33 @@ async def analyze_resume(
 
     response = ""
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"resume-{uuid.uuid4()}",
-            system_message=RESUME_ANALYZER_SYSTEM_PROMPT,
-        ).with_model("openai", "gpt-4o")
-
         user_text = (
             f"=== JOB DESCRIPTION ===\n{job_description}\n\n"
             f"=== RESUME ===\n{resume_content}\n\n"
-            f"Analyze the match and respond with the required JSON only."
+            f"Analyze the match. For EACH category, give a numeric score, a specific explanation, "
+            f"and concrete matched_evidence + missing_evidence drawn from the actual resume and JD text above. "
+            f"Respond with the required JSON only."
         )
 
-        response = await chat.send_message(UserMessage(text=user_text))
+        response = await llm.generate(
+            system_prompt=RESUME_ANALYZER_SYSTEM_PROMPT,
+            user_prompt=user_text
+        )
+        text = _strip_code_fence(response)
+        raw = json.loads(text)
+        raw = _normalize_category_scores(raw)
 
-        text = response.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip().rstrip("`").strip()
+        validated = AnalysisResult.model_validate(raw)
+        return validated.model_dump()
 
-        return json.loads(text)
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parse failed: {str(e)} | raw: {response[:300]}")
-        raise HTTPException(status_code=500, detail="AI returned an unexpected format. Please try again.")
+        logger.error(f"JSON parse failed: {str(e)} | raw: {response[:400]}")
+        raise HTTPException(status_code=502, detail="AI returned an unexpected format. Please try again.")
+    except ValidationError as e:
+        logger.error(f"Schema validation failed: {e.errors()} | raw: {response[:400]}")
+        raise HTTPException(status_code=502, detail="AI response failed schema validation. Please try again.")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Resume analysis failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to analyze. Please try again.")

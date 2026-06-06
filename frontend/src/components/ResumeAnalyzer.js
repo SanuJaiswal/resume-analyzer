@@ -21,7 +21,6 @@ import {
   Zap,
   Moon,
   Sun,
-  Github,
 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
@@ -31,6 +30,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../hooks/use-toast';
 import { useAnalysisHistory } from '../hooks/useAnalysisHistory';
 import { ScoreRing, CategoryRadarChart, SkillsBarChart } from './analyzer/AnalyzerCharts';
+import WhyThisScore from './analyzer/WhyThisScore';
 import { validateUrl, validateAnalysisInput, validatePdfFile } from './analyzer/validators';
 import { SAMPLE_RESUME, SAMPLE_JD } from '../data/sampleAnalyzerData';
 
@@ -192,15 +192,6 @@ const ResumeAnalyzer = () => {
           </div>
 
           <div className="flex items-center gap-2">
-            <a
-              href="https://github.com/SanuJaiswal"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hidden sm:flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 hover:text-cyan-600 dark:hover:text-cyan-400 transition px-3 py-1.5 rounded-md"
-              title="GitHub"
-            >
-              <Github className="h-4 w-4" />
-            </a>
             {history.length > 0 && (
               <Button variant="ghost" size="sm" onClick={() => setShowHistory((s) => !s)} className="gap-2">
                 <History className="h-4 w-4" />
@@ -476,6 +467,11 @@ const ResumeAnalyzer = () => {
                   <CategoryRadarChart categoryScores={result.category_scores} />
                   <SkillsBarChart matched={result.matched_skills} missing={result.missing_skills} />
                 </div>
+              )}
+
+              {/* Why This Score? — Explainable AI */}
+              {result.category_scores && (
+                <WhyThisScore categoryScores={result.category_scores} />
               )}
 
               {/* Skills Grid */}
